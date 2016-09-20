@@ -91,6 +91,31 @@ class UnityTestRunnerGenerator
     end
   end
 
+  def find_test_for_normal_case(arguments, name, call)
+    args = nil
+    if (@options[:use_param_tests] and !arguments.empty?)
+      args = []
+      arguments.scan(/\s*TEST_CASE\s*\((.*)\)\s*$/) {|a| args << a[0]}
+    end
+    return { :type => "TEST_CASE", :test => name, :args => args, :call => call, :line_number => 0 }
+  end
+
+  def find_test_for_range_case(arguments, name, call)
+    args   = nil
+    ranges = nil
+    if (@options[:use_param_tests] and !arguments.empty?)
+      args = []
+      ranges = []
+      # discover the loop boundaries
+      args = arguments.strip.gsub(/\s*\]\s*,\s*\[\s*/,"-").gsub(/\[|\]/,"").split('-')
+      args.each_index  do |i|
+        iter = args[i].split(/,/)
+        ranges << { :start =>iter[0], :stop =>iter[1], :increment =>iter[2] }
+      end
+    end
+    return { :type => "TEST_RANGE", :test => name, :args => args, :call => call, :line_number => 0, :iterator=> ranges}
+  end
+
   def find_tests(source)
     tests_and_line_numbers = []
 
@@ -102,21 +127,18 @@ class UnityTestRunnerGenerator
                               | (;|\{|\}) /x)                  # Match ;, {, and } as end of lines
 
     lines.each_with_index do |line, index|
-      #find tests
-      if line =~ /^((?:\s*TEST_CASE\s*\(.*?\)\s*)*)\s*void\s+((?:#{@options[:test_prefix]}).*)\s*\(\s*(.*)\s*\)/
-        arguments = $1
+      if line =~ /^((?:\s*TEST_[A-Z]*\s*\(.*?\)\s*)*)\s*void\s+(test.*?)\s*\(\s*(.*)\s*\)/
+        macros = $1
         name = $2
         call = $3
-        params = $4
-        args = nil
-        if (@options[:use_param_tests] and !arguments.empty?)
-          args = []
-          arguments.scan(/\s*TEST_CASE\s*\((.*)\)\s*$/) {|a| args << a[0]}
-        end
-        tests_and_line_numbers << { :test => name, :args => args, :call => call, :params => params, :line_number => 0 }
+        # find normal tests
+        tests_and_line_numbers << find_test_for_normal_case(macros, name, call)
+        # find range tests
+        macros.scan(/\s*TEST_RANGE\s*\((.*)\)\s*$/) {|args|
+          tests_and_line_numbers << find_test_for_range_case(args[0], name, call)
+        }
       end
     end
-    tests_and_line_numbers.uniq! {|v| v[:test] }
 
     #determine line numbers and create tests to run
     source_lines = source.split("\n")
@@ -296,6 +318,45 @@ class UnityTestRunnerGenerator
     output.puts("}")
   end
 
+  def create_tagged_testcase(output, test)
+    test[:args].each {|args| output.puts("  RUN_TEST(#{test[:test]}, #{test[:line_number]}, #{args});")}
+  end
+
+  def create_tagged_testrange(output, test)
+    s = ""
+    output.puts("  /* TEST_RANGE( #{test[:args]} ) */")
+    cnt = 1
+    args_list = []
+
+    # generate on the fly code for the start of nested loops
+    test[:iterator].each do |iter|
+      s << "  "*cnt + "arg#{cnt} = #{iter[:start]}\n"
+      s << "  "*cnt + "while arg#{cnt} <= #{iter[:stop]} do\n"
+
+      args_list << "arg#{cnt}"
+      cnt += 1
+    end
+
+    # generate on the fly code to discover number of arguments
+    # to pass to RUN_TEST macro
+    args  = ""
+    args_list.each {|a| args << "\#{#{a}}, " }
+    args.chop!.chop!
+    command = "  RUN_TEST(#{test[:test]}, #{test[:line_number]}, #{args} );"
+    s << "  "*cnt + "output.puts(\"#{command}\")\n"
+
+    # generate on the fly code to properly increment counter
+    # and finish loops
+    test[:iterator].reverse.each do |iter|
+      cnt -= 1
+      s << "  "*cnt + "  arg#{cnt} += #{iter[:increment]}\n"
+      s << "  "*cnt + "end\n"
+    end
+
+    # execute/evaluate on the fly code here
+    eval s
+  end
+
   def create_main(output, filename, tests, used_mocks)
     output.puts("\n\n/*=======MAIN=====*/")
     main_name = (@options[:main_name].to_sym == :auto) ? "main_#{filename.gsub('.c','')}" : "#{@options[:main_name]}"
@@ -345,7 +406,15 @@ class UnityTestRunnerGenerator
         if ((test[:args].nil?) or (test[:args].empty?))
           output.puts("  RUN_TEST(#{test[:test]}, #{test[:line_number]}, RUN_TEST_NO_ARGS);")
         else
-          test[:args].each {|args| output.puts("  RUN_TEST(#{test[:test]}, #{test[:line_number]}, #{args});")}
+          case test[:type]
+          when "TEST_CASE"
+            create_tagged_testcase(output, test)
+          when "TEST_RANGE"
+            create_tagged_testrange(output, test)
+          else
+            # something when wrong
+            output.puts("  /* Something when wrong*/ #error \"TEST_CASE vs TEST_RANGE\" ")
+          end
         end
       end
     else
