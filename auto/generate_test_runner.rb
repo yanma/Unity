@@ -91,29 +91,40 @@ class UnityTestRunnerGenerator
     end
   end
 
-  def find_test_for_normal_case(arguments, name, call)
-    args = nil
-    if (@options[:use_param_tests] and !arguments.empty?)
-      args = []
-      arguments.scan(/\s*TEST_CASE\s*\((.*)\)\s*$/) {|a| args << a[0]}
-    end
-    return { :type => "TEST_CASE", :test => name, :args => args, :call => call, :line_number => 0 }
-  end
-
-  def find_test_for_range_case(arguments, name, call)
-    args   = nil
-    ranges = nil
-    if (@options[:use_param_tests] and !arguments.empty?)
-      args = []
-      ranges = []
-      # discover the loop boundaries
-      args = arguments.strip.gsub(/\s*\]\s*,\s*\[\s*/,"-").gsub(/\[|\]/,"").split('-')
-      args.each_index  do |i|
-        iter = args[i].split(/,/)
-        ranges << { :start =>iter[0], :stop =>iter[1], :increment =>iter[2] }
+  def find_test_for_normal_case(macros, name, call)
+    tests_and_line_numbers = []
+    if !macros.empty?
+      macros.scan(/\s*TEST_CASE\s*\((.*)\)\s*$/) do |macro|
+        macro_args = macro[0]
+        test_args = []
+        if !macro_args.empty?
+          test_args = [macro_args]
+        end
+        tests_and_line_numbers << { :type => "TEST_CASE", :test => name, :args => test_args, :call => call, :line_number => 0 }
       end
     end
-    return { :type => "TEST_RANGE", :test => name, :args => args, :call => call, :line_number => 0, :iterator=> ranges}
+    return tests_and_line_numbers
+  end
+
+  def find_test_for_range_case(macros, name, call)
+    tests_and_line_numbers = []
+    if !macros.empty?
+      macros.scan(/\s*TEST_RANGE\s*\((.*)\)\s*$/) do |macro|
+        macro_args = macro[0]
+        test_args = []
+        test_ranges = []
+        if !macro_args.empty?
+          test_args = macro_args.strip.gsub(/\s*\]\s*,\s*\[\s*/,"-").gsub(/\[|\]/,"").split('-')
+          test_ranges = []
+          test_args.each_index  do |i|
+            iter = test_args[i].split(/,/)
+            test_ranges << { :start =>iter[0], :stop =>iter[1], :increment =>iter[2] }
+          end
+        end
+        tests_and_line_numbers << { :type => "TEST_RANGE", :test => name, :args => test_args, :call => call, :line_number => 0, :iterator=> test_ranges}
+      end
+    end
+    tests_and_line_numbers
   end
 
   def find_tests(source)
@@ -126,19 +137,17 @@ class UnityTestRunnerGenerator
     lines = source_scrubbed.split(/(^\s*\#.*$)                 # Treat preprocessor directives as a logical line
                               | (;|\{|\}) /x)                  # Match ;, {, and } as end of lines
 
-    lines.each_with_index do |line, index|
-      if line =~ /^((?:\s*TEST_[A-Z]*\s*\(.*?\)\s*)*)\s*void\s+(test.*?)\s*\(\s*(.*)\s*\)/
-        macros = $1
-        name = $2
-        call = $3
-        # find normal tests
-        tests_and_line_numbers << find_test_for_normal_case(macros, name, call)
-        # find range tests
-        macros.scan(/\s*TEST_RANGE\s*\((.*)\)\s*$/) {|args|
-          tests_and_line_numbers << find_test_for_range_case(args[0], name, call)
-        }
-      end
-    end
+    if @options[:use_param_tests]
+	  lines.each_with_index do |line, index|
+		if line =~ /^((?:\s*TEST_[A-Z]*\s*\(.*?\)\s*)*)\s*void\s+(test.*?)\s*\(\s*(.*)\s*\)/
+		  macros = $1; name = $2; call = $3
+		  # find normal tests
+		  tests_and_line_numbers += find_test_for_normal_case(macros, name, call)
+		  # find range tests
+		  tests_and_line_numbers += find_test_for_range_case(macros, name, call)
+		end
+	  end
+	end
 
     #determine line numbers and create tests to run
     source_lines = source.split("\n")
@@ -319,7 +328,10 @@ class UnityTestRunnerGenerator
   end
 
   def create_tagged_testcase(output, test)
-    test[:args].each {|args| output.puts("  RUN_TEST(#{test[:test]}, #{test[:line_number]}, #{args});")}
+    output.puts("  /* TEST_CASE( #{test[:args]} ) */")
+    test[:args].each do |args|
+      output.puts("  RUN_TEST(#{test[:test]}, #{test[:line_number]}, #{args});")
+    end
   end
 
   def create_tagged_testrange(output, test)
